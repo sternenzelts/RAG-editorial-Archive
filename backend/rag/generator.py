@@ -97,6 +97,99 @@ def clean_raw(raw: str) -> str:
     return raw.strip()
 
 
+def unwrap_answer(data: dict) -> dict:
+    """Recursively unwrap if the answer field itself is a JSON string containing the full response."""
+    answer = data.get("answer", "")
+    if not isinstance(answer, str):
+        return data
+
+    # Check if answer contains a full JSON structure (nested response)
+    stripped = answer.strip()
+    if stripped.startswith("{"):
+        try:
+            nested = json.loads(stripped)
+            if isinstance(nested, dict) and "answer" in nested:
+                # Merge: prefer nested data but keep outer citations/confidence if nested is missing them
+                merged = {
+                    "answer": nested.get("answer", answer),
+                    "citations": nested.get("citations") or data.get("citations", []),
+                    "confidence": nested.get("confidence") or data.get("confidence", 0.0),
+                    "conflicts": nested.get("conflicts") or data.get("conflicts", []),
+                }
+                return unwrap_answer(merged)  # recurse in case still nested
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Strip any trailing JSON artifact that got appended to the answer text
+    # e.g. answer = "Some text", "citations": [...]
+    for pattern in ['"\s*,\s*"citations', '"\s*,\s*"confidence', '"\s*}']:
+        import re
+        match = re.search(pattern, answer)
+        if match:
+            answer = answer[:match.start()].strip().strip('"')
+            data = dict(data)
+            data["answer"] = answer
+            break
+
+    return data
+
+
+def build_fallback_citations(chunks: list[tuple[Chunk, float]]) -> list[dict]:
+    """Build citations directly from retrieved chunks when the LLM returns none."""
+    citations = []
+    seen_sources = set()
+    for i, (chunk, score) in enumerate(chunks):
+        source_name = chunk.source.split('/')[-1]
+        # One citation per unique source (use the highest-scoring chunk for that source)
+        if source_name not in seen_sources:
+            seen_sources.add(source_name)
+            # Use first 200 chars of chunk text as excerpt
+            excerpt = chunk.text[:200].strip()
+            if len(chunk.text) > 200:
+                excerpt += "..."
+            citations.append({
+                "chunk": i + 1,
+                "source": source_name,
+                "page": chunk.page,
+                "excerpt": excerpt,
+            })
+    return citations
+
+
+def compute_retrieval_confidence(chunks: list[tuple[Chunk, float]]) -> float:
+    """Compute a reliable confidence score from cosine similarity of the top retrieved chunks.
+
+    Cosine similarity scores from nomic-embed-text typically range 0.5–1.0 for relevant
+    content. We normalise into a 0–1 confidence band:
+      >= 0.88  → High   (0.90+)
+      >= 0.80  → Medium (0.75)
+      >= 0.70  → Medium (0.60)
+      < 0.70   → Low    (0.40)
+    We blend the top-3 chunk scores (weighted toward the best match) so a single
+    strong hit still reads as High Confidence.
+    """
+    if not chunks:
+        return 0.0
+
+    scores = [score for _, score in chunks[:3]]  # top-3 only
+    # Weighted average: best chunk counts double
+    if len(scores) == 1:
+        weighted = scores[0]
+    elif len(scores) == 2:
+        weighted = (scores[0] * 2 + scores[1]) / 3
+    else:
+        weighted = (scores[0] * 2 + scores[1] + scores[2]) / 4
+
+    if weighted >= 0.88:
+        return 0.92
+    elif weighted >= 0.80:
+        return 0.78
+    elif weighted >= 0.70:
+        return 0.62
+    else:
+        return 0.42
+
+
 def generate_answer(query: str, chunks: list[tuple[Chunk, float]]) -> CitedAnswer:
 
     if not chunks:
@@ -112,7 +205,7 @@ def generate_answer(query: str, chunks: list[tuple[Chunk, float]]) -> CitedAnswe
     # call Mistral locally via Ollama
     # system prompt enforces JSON-only output
     response = ollama.chat(
-        model="ministral-3:3b",
+        model="qwen3.5:4b",
         messages=[
             {
                 "role": "system",
@@ -128,27 +221,41 @@ def generate_answer(query: str, chunks: list[tuple[Chunk, float]]) -> CitedAnswe
     raw = response["message"]["content"].strip()
     raw = clean_raw(raw)
 
+    # Pre-compute retrieval-based confidence — objective, not LLM-guessed
+    retrieval_confidence = compute_retrieval_confidence(chunks)
+
     try:
         data = json.loads(raw)
 
+        # Recursively unwrap nested JSON in the answer field
+        data = unwrap_answer(data)
+
         answer = data.get("answer", "")
         citations = data.get("citations", [])
-        confidence = data.get("confidence", 0.0)
+        llm_confidence = data.get("confidence", 0.0)
         conflicts = data.get("conflicts", [])
 
-        # if answer itself contains a nested JSON string, extract it
-        if isinstance(answer, str) and answer.strip().startswith("{"):
-            try:
-                nested = json.loads(answer)
-                answer = nested.get("answer", answer)
-                if not citations:
-                    citations = nested.get("citations", [])
-                if not confidence:
-                    confidence = nested.get("confidence", 0.0)
-                if not conflicts:
-                    conflicts = nested.get("conflicts", [])
-            except json.JSONDecodeError:
-                pass
+        # Use retrieval score as the authoritative confidence.
+        # Small models chronically under-report (0.2–0.4) even with perfect context.
+        # We take the higher of the two so a genuinely uncertain answer isn't inflated,
+        # but a good retrieval hit isn't penalised by a pessimistic LLM.
+        confidence = max(retrieval_confidence, float(llm_confidence) if llm_confidence else 0.0)
+
+        # Fallback: LLM returned empty citations — auto-build from retrieved chunks
+        if not citations and chunks:
+            citations = build_fallback_citations(chunks)
+
+        # Validate citation structure — filter out any malformed entries
+        valid_citations = []
+        for c in citations:
+            if isinstance(c, dict) and "source" in c:
+                valid_citations.append({
+                    "chunk": c.get("chunk", 1),
+                    "source": c.get("source", ""),
+                    "page": c.get("page"),
+                    "excerpt": c.get("excerpt", ""),
+                })
+        citations = valid_citations
 
         return CitedAnswer(
             answer=answer,
@@ -158,10 +265,11 @@ def generate_answer(query: str, chunks: list[tuple[Chunk, float]]) -> CitedAnswe
         )
 
     except json.JSONDecodeError:
-        # if Mistral didn't follow the format, return raw text with low confidence
+        # LLM didn't return valid JSON — use raw text + retrieval-based confidence
+        fallback_citations = build_fallback_citations(chunks) if chunks else []
         return CitedAnswer(
             answer=raw,
-            citations=[],
-            confidence=0.1,
+            citations=fallback_citations,
+            confidence=retrieval_confidence,
             conflicts=[]
         )

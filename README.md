@@ -38,7 +38,7 @@ A full-stack **Retrieval-Augmented Generation (RAG)** application that lets you 
 |---|---|
 | Frontend | React + TypeScript + Vite + Tailwind CSS |
 | Backend | FastAPI (Python) |
-| LLM | Ollama — `ministral-3:3b` (generation) + `nomic-embed-text` (embeddings) |
+| LLM | Ollama — `qwen3.5:4b` (generation, configurable) + `nomic-embed-text` (embeddings) |
 | Vector Store | Custom in-memory store with cosine similarity, persisted to JSON |
 
 ---
@@ -54,9 +54,24 @@ A full-stack **Retrieval-Augmented Generation (RAG)** application that lets you 
 ### 1. Pull the required models
 
 ```bash
-ollama pull ministral-3:3b
+# Embedding model (required)
 ollama pull nomic-embed-text
+
+# Generation model — choose based on your machine (see model guide below)
+ollama pull qwen3.5:4b
 ```
+
+> **💡 Model Selection** — The generation model can be swapped to suit your hardware.
+> After pulling a different model, update `model=` in `backend/rag/generator.py` and `backend/main.py`.
+>
+> | Model | RAM Required | Quality | Best For |
+> |---|---|---|---|
+> | `qwen3.5:4b` | ~3.5 GB | ⭐⭐⭐⭐ | Default — good balance of speed and accuracy |
+> | `llama3.2:3b` | ~2.5 GB | ⭐⭐⭐ | Low-RAM machines (4–6 GB RAM) |
+> | `qwen2.5:7b` | ~5.5 GB | ⭐⭐⭐⭐⭐ | Best JSON compliance, recommended upgrade |
+> | `mistral:7b` | ~5 GB | ⭐⭐⭐⭐ | Strong reasoning, good citation following |
+> | `qwen3.5:9b` | ~7 GB | ⭐⭐⭐⭐⭐ | High-end machines (16+ GB RAM) |
+> | `phi3.5` | ~3.8 GB | ⭐⭐⭐⭐ | Microsoft model, fast and instruction-aware |
 
 ### 2. Backend
 
@@ -128,3 +143,5 @@ RAG QA/
 - First embedding on a large PDF can be slow — Ollama runs locally
 - `vector_store.json` and `workspace_store.json` are auto-created on first run
 - Uploaded PDFs are stored in `backend/uploads/` (git-ignored)
+- The generation model **depends on your machine** — swap `model=` in `generator.py` and `main.py` with any Ollama-compatible model. See the model guide in the Getting Started section above.
+- Larger models (7B+) give better citation accuracy and JSON formatting but require more RAM

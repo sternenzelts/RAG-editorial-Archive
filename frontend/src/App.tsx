@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import Sidebar from './components/Sidebar'
 import TopBar from './components/TopBar'
 import ChatWindow from './components/ChatWindow'
@@ -9,7 +9,7 @@ import Archive from './components/Archive'
 import Workspace from './components/Workspace'
 
 interface Message {
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'error'
   answer: string
   citations: any[]
   confidence: number
@@ -30,7 +30,9 @@ function App() {
   })
   const [isLoading, setIsLoading] = useState(false)
   const [question, setQuestion] = useState('')
+  const [scrollToIndex, setScrollToIndex] = useState<number | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
 
   // Persist messages to localStorage whenever they change
   useEffect(() => {
@@ -73,53 +75,97 @@ function App() {
     if (file) handleUpload(file)
   }
 
+  const unwrapAnswer = useCallback((ans: string, cit: any[], conf: number, con: any[]): [string, any[], number, any[]] => {
+    if (typeof ans !== 'string') return [ans, cit, conf, con]
+    const trimmed = ans.trim()
+    if (trimmed.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(trimmed)
+        if (parsed && typeof parsed.answer === 'string') {
+          return unwrapAnswer(parsed.answer, parsed.citations ?? cit, parsed.confidence ?? conf, parsed.conflicts ?? con)
+        }
+      } catch { /* not JSON */ }
+    }
+    const jsonMatch = trimmed.match(/\{[\s\S]*"answer"[\s\S]*\}/)
+    if (jsonMatch) {
+      try {
+        const parsed = JSON.parse(jsonMatch[0])
+        if (parsed && typeof parsed.answer === 'string') {
+          return unwrapAnswer(parsed.answer, parsed.citations ?? cit, parsed.confidence ?? conf, parsed.conflicts ?? con)
+        }
+      } catch { /* not valid JSON */ }
+    }
+    const trailingJson = ans.match(/^([\s\S]*?)"\s*,\s*"(?:citations|confidence|conflicts)/)
+    if (trailingJson) return [trailingJson[1].replace(/^"/, '').trim(), cit, conf, con]
+    return [ans, cit, conf, con]
+  }, [])
+
+  const pushError = useCallback((message: string) => {
+    const errMsg: Message = { role: 'error', answer: message, citations: [], confidence: 0, conflicts: [] }
+    setMessages(prev => [...prev, errMsg])
+  }, [])
+
+  const handleStop = useCallback(() => {
+    abortControllerRef.current?.abort()
+    abortControllerRef.current = null
+    setIsLoading(false)
+  }, [])
+
   const handleSubmit = async () => {
-    if (!question.trim()) return
+    if (!question.trim() || isLoading) return
 
     const userMsg: Message = { role: 'user', answer: question, citations: [], confidence: 0, conflicts: [] }
     setMessages(prev => [...prev, userMsg])
     setQuestion('')
     setIsLoading(true)
 
+    const controller = new AbortController()
+    abortControllerRef.current = controller
+
     try {
       const res = await fetch('http://localhost:8000/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question }),
+        signal: controller.signal,
       })
-      const data = await res.json()
 
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}))
+        const detail = errBody?.detail ?? ''
+        if (detail.toLowerCase().includes('out of memory') || detail.toLowerCase().includes('oom')) {
+          pushError('⚠️ Out of memory — the model ran out of RAM. Try closing other apps or switching to a smaller model.')
+        } else if (res.status === 404 || detail.toLowerCase().includes('model')) {
+          pushError('⚠️ Model not found — make sure you\'ve pulled the model first: ollama pull qwen3.5:4b')
+        } else {
+          pushError(`⚠️ Server error (${res.status}): ${detail || 'Unknown error from backend.'}`)
+        }
+        return
+      }
+
+      const data = await res.json()
       let answer = data.answer
       let citations = data.citations
       let confidence = data.confidence
       let conflicts = data.conflicts
 
-      if (typeof answer === 'string') {
-        const jsonMatch = answer.match(/\{[\s\S]*"answer"[\s\S]*\}/)
-        if (jsonMatch) {
-          try {
-            const parsed = JSON.parse(jsonMatch[0])
-            answer = parsed.answer ?? answer
-            citations = parsed.citations ?? citations
-            confidence = parsed.confidence ?? confidence
-            conflicts = parsed.conflicts ?? conflicts
-          } catch {
-            // not valid JSON, use as-is
-          }
-        }
-      }
+      ;[answer, citations, confidence, conflicts] = unwrapAnswer(answer, citations, confidence, conflicts)
 
-      const assistantMsg: Message = {
-        role: 'assistant',
-        answer,
-        citations,
-        confidence,
-        conflicts,
-      }
+      const assistantMsg: Message = { role: 'assistant', answer, citations, confidence, conflicts }
       setMessages(prev => [...prev, assistantMsg])
-    } catch (err) {
-      console.error(err)
+
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        // User stopped — don't show error
+        return
+      }
+      if (err instanceof TypeError && err.message.includes('fetch')) {
+        pushError('⚠️ Cannot connect to the model server — make sure the backend is running on port 8000.')
+      } else {
+        pushError('⚠️ Unexpected error: ' + (err?.message ?? String(err)))
+      }
     } finally {
+      abortControllerRef.current = null
       setIsLoading(false)
     }
   }
@@ -163,6 +209,9 @@ function App() {
               question={question}
               onQuestionChange={setQuestion}
               onSubmit={handleSubmit}
+              onStop={handleStop}
+              scrollToIndex={scrollToIndex}
+              onScrolled={() => setScrollToIndex(null)}
             />
           )}
           {activeTab === 'archive' && (
@@ -194,7 +243,13 @@ function App() {
             </div>
           )}
           {activeTab === 'recent' && (
-            <RecentAnalysis messages={messages} />
+            <RecentAnalysis
+              messages={messages}
+              onOpenInChat={(msgIndex) => {
+                setScrollToIndex(msgIndex)
+                setActiveTab('documents')
+              }}
+            />
           )}
           {activeTab === 'workspace' && (
             <Workspace onUploadClick={() => fileInputRef.current?.click()} />

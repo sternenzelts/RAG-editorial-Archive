@@ -11,9 +11,10 @@ interface AnalysisEntry {
 
 interface RecentAnalysisProps {
   messages: { role: string; answer: string; citations: any[] }[]
+  onOpenInChat: (msgIndex: number) => void
 }
 
-export default function RecentAnalysis({ messages }: RecentAnalysisProps) {
+export default function RecentAnalysis({ messages, onOpenInChat }: RecentAnalysisProps) {
   const [filter, setFilter] = useState('')
   const [deletedIds, setDeletedIds] = useState<string[]>([])
 
@@ -105,6 +106,7 @@ export default function RecentAnalysis({ messages }: RecentAnalysisProps) {
                   key={entry.id}
                   entry={entry}
                   onDelete={() => setDeletedIds(prev => [...prev, entry.id])}
+                  onOpen={() => onOpenInChat(Number(entry.id))}
                 />
               ))}
             </div>
@@ -124,6 +126,7 @@ export default function RecentAnalysis({ messages }: RecentAnalysisProps) {
                   key={entry.id}
                   entry={entry}
                   onDelete={() => setDeletedIds(prev => [...prev, entry.id])}
+                  onOpen={() => onOpenInChat(Number(entry.id))}
                 />
               ))}
             </div>
@@ -135,7 +138,7 @@ export default function RecentAnalysis({ messages }: RecentAnalysisProps) {
   )
 }
 
-function EntryCard({ entry, onDelete }: { entry: AnalysisEntry; onDelete: () => void }) {
+function EntryCard({ entry, onDelete, onOpen }: { entry: AnalysisEntry; onDelete: () => void; onOpen: () => void }) {
   return (
     <div className="group flex flex-col md:flex-row gap-6 p-6 bg-white rounded-xl border border-slate-100 hover:shadow-md transition-all duration-300 relative">
       {/* Accent bar */}
@@ -168,8 +171,9 @@ function EntryCard({ entry, onDelete }: { entry: AnalysisEntry; onDelete: () => 
       {/* Actions */}
       <div className="flex md:flex-col items-center justify-center gap-2 md:border-l border-slate-100 md:pl-6">
         <button
-          className="p-2 text-slate-400 hover:bg-slate-50 rounded-lg transition-colors"
-          title="Reopen"
+          onClick={onOpen}
+          className="p-2 text-slate-400 hover:bg-blue-50 hover:text-blue-500 rounded-lg transition-colors"
+          title="Open in Chat"
         >
           <span className="material-symbols-outlined text-[20px]">open_in_new</span>
         </button>

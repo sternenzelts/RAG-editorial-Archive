@@ -52,9 +52,7 @@ export default function TopBar({ activeTab, chunksLoaded, onTabChange }: TopBarP
             {item.label}
           </a>
         ))}
-        <button className="text-slate-900 hover:opacity-70 transition-opacity ml-2">
-          <span className="material-symbols-outlined">database</span>
-        </button>
+
       </nav>
     </header>
   )

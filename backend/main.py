@@ -323,7 +323,7 @@ RETURN THIS EXACT JSON FORMAT:
 }}""".strip()
 
     response = ollama.chat(
-        model="ministral-3:3b",
+        model="qwen3.5:4b",
         messages=[
             {
                 "role": "system",

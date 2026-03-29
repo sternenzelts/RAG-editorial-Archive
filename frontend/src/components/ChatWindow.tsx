@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 
 interface Citation {
@@ -14,7 +15,7 @@ interface Conflict {
 }
 
 interface Message {
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'error'
   answer: string
   citations: Citation[]
   confidence: number
@@ -27,6 +28,9 @@ interface ChatWindowProps {
   question: string
   onQuestionChange: (q: string) => void
   onSubmit: () => void
+  onStop: () => void
+  scrollToIndex?: number | null
+  onScrolled?: () => void
 }
 
 function ConfidenceBadge({ score }: { score: number }) {
@@ -35,11 +39,36 @@ function ConfidenceBadge({ score }: { score: number }) {
   return <span className="px-2 py-0.5 bg-slate-100 text-slate-500 text-[10px] font-bold rounded-full uppercase">Low Confidence</span>
 }
 
-export default function ChatWindow({ messages, isLoading, question, onQuestionChange, onSubmit }: ChatWindowProps) {
+export default function ChatWindow({ messages, isLoading, question, onQuestionChange, onSubmit, onStop, scrollToIndex, onScrolled }: ChatWindowProps) {
+  const bottomRef = useRef<HTMLDivElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const initialScrollDone = useRef(false)
+  const msgRefs = useRef<Record<number, HTMLDivElement | null>>({})
+  const [highlightedIndex, setHighlightedIndex] = useState<number | null>(null)
+
+  // Auto-scroll to bottom on every new message or when loading starts
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: initialScrollDone.current ? 'smooth' : 'instant' })
+    initialScrollDone.current = true
+  }, [messages, isLoading])
+
+  // Scroll to a specific message when coming from Recent Analysis
+  useEffect(() => {
+    if (scrollToIndex == null) return
+    const el = msgRefs.current[scrollToIndex]
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      setHighlightedIndex(scrollToIndex)
+      onScrolled?.()
+      // Remove highlight after animation
+      setTimeout(() => setHighlightedIndex(null), 2000)
+    }
+  }, [scrollToIndex, onScrolled])
+
   return (
     <div className="flex flex-col h-full">
       {/* Chat History */}
-      <div className="flex-1 overflow-y-auto px-24 py-12 space-y-12">
+      <div ref={containerRef} className="flex-1 overflow-y-auto px-24 py-12 space-y-12">
 
         {messages.length === 0 && !isLoading && (
           <div className="flex flex-col items-center justify-center h-full text-center pt-32">
@@ -52,7 +81,14 @@ export default function ChatWindow({ messages, isLoading, question, onQuestionCh
         )}
 
         {messages.map((msg, i) => (
-          <div key={i} className="space-y-8">
+          <div
+            key={i}
+            ref={el => { msgRefs.current[i] = el }}
+            className={`space-y-8 rounded-2xl transition-all duration-700 ${
+              highlightedIndex === i ? 'ring-2 ring-blue-300 ring-offset-4 bg-blue-50/40' : ''
+            }`}
+          >
+
             {/* User Question */}
             {msg.role === 'user' && (
               <div className="flex flex-col items-end gap-2">
@@ -60,6 +96,17 @@ export default function ChatWindow({ messages, isLoading, question, onQuestionCh
                   <p className="text-slate-800 text-lg leading-relaxed">{msg.answer}</p>
                 </div>
                 <span className="text-[10px] font-bold tracking-widest uppercase text-slate-300 px-2">User Query</span>
+              </div>
+            )}
+
+            {/* Error Message */}
+            {msg.role === 'error' && (
+              <div className="flex items-start gap-4 bg-red-50 border border-red-200 rounded-xl p-5 max-w-3xl">
+                <span className="material-symbols-outlined text-red-400 mt-0.5 shrink-0">error</span>
+                <div>
+                  <p className="text-xs font-bold text-red-700 uppercase tracking-tight mb-1">Model Error</p>
+                  <p className="text-sm text-red-600 leading-relaxed">{msg.answer}</p>
+                </div>
               </div>
             )}
 
@@ -88,25 +135,21 @@ export default function ChatWindow({ messages, isLoading, question, onQuestionCh
                         .replace(/Citations:[\s\S]*$/gi, '')
                         .replace(/\[CHUNK \d+\]/gi, '')
                         .replace(/\[([^\]]+)\]\([^)]+\)/g, '[$1]')
-                        .replace(/"\s*,\s*"citations[\s\S]*$/gi, '')
+                        .replace(/"?\s*,\s*"citations[\s\S]*$/gi, '')
                         .replace(/\*\*\[/g, '[')
                         .replace(/\]\*\*/g, ']')
                         .trim()
                       }
                     </Markdown>
-
                   </div>
 
-                  {/* Citation Cards — one card per unique source, deduplicated excerpts */}
+                  {/* Citation Cards */}
                   {msg.citations.length > 0 && (
                     <div className="grid grid-cols-2 gap-4 pt-4">
                       {Object.values(
                         msg.citations.reduce((acc: Record<string, any>, citation) => {
                           if (!acc[citation.source]) {
-                            acc[citation.source] = {
-                              ...citation,
-                              excerpts: [citation.excerpt]
-                            }
+                            acc[citation.source] = { ...citation, excerpts: [citation.excerpt] }
                           } else {
                             if (!acc[citation.source].excerpts.includes(citation.excerpt)) {
                               acc[citation.source].excerpts.push(citation.excerpt)
@@ -123,7 +166,6 @@ export default function ChatWindow({ messages, isLoading, question, onQuestionCh
                             </div>
                             <ConfidenceBadge score={msg.confidence} />
                           </div>
-                          {/* Deduplicated excerpts stacked */}
                           <div className="bg-slate-50 p-3 rounded-lg space-y-2">
                             {citation.excerpts.map((excerpt: string, k: number) => (
                               <p key={k} className="text-xs italic text-slate-500 leading-relaxed border-b border-slate-100 last:border-0 pb-2 last:pb-0">
@@ -152,7 +194,6 @@ export default function ChatWindow({ messages, isLoading, question, onQuestionCh
                           <p key={k} className="text-xs text-red-700 mt-1">{c.description}</p>
                         ))}
                       </div>
-                      <button className="text-[10px] font-bold text-red-500 uppercase hover:underline">Resolve</button>
                     </div>
                   )}
                 </div>
@@ -170,7 +211,7 @@ export default function ChatWindow({ messages, isLoading, question, onQuestionCh
                 <span className="material-symbols-outlined text-slate-400 animate-pulse">hourglass_empty</span>
               </div>
               <div className="flex flex-col">
-                <span className="text-slate-800 font-bold text-sm" style={{ fontFamily: 'Manrope' }}>Mistral is thinking...</span>
+                <span className="text-slate-800 font-bold text-sm" style={{ fontFamily: 'Manrope' }}>Model is thinking...</span>
                 <span className="text-sky-600 text-[11px] font-semibold flex items-center gap-1">
                   <span className="w-1 h-1 rounded-full bg-sky-500" />
                   Cross-referencing document chunks
@@ -185,6 +226,9 @@ export default function ChatWindow({ messages, isLoading, question, onQuestionCh
             </div>
           </div>
         )}
+
+        {/* Scroll anchor */}
+        <div ref={bottomRef} />
       </div>
 
       {/* Input Bar */}
@@ -198,16 +242,29 @@ export default function ChatWindow({ messages, isLoading, question, onQuestionCh
               type="text"
               value={question}
               onChange={(e) => onQuestionChange(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && onSubmit()}
+              onKeyDown={(e) => e.key === 'Enter' && !isLoading && onSubmit()}
               placeholder="Ask the archivist about your documents..."
               className="flex-1 border-none focus:ring-0 bg-transparent text-sm py-3 placeholder:text-slate-300"
+              disabled={isLoading}
             />
-            <button
-              onClick={onSubmit}
-              className="bg-black text-white w-12 h-12 rounded-xl flex items-center justify-center hover:opacity-80 transition-all active:scale-95"
-            >
-              <span className="material-symbols-outlined text-lg">arrow_upward</span>
-            </button>
+
+            {/* Stop button — shown while loading */}
+            {isLoading ? (
+              <button
+                onClick={onStop}
+                title="Stop generation"
+                className="bg-red-500 text-white w-12 h-12 rounded-xl flex items-center justify-center hover:bg-red-600 transition-all active:scale-95 animate-pulse"
+              >
+                <span className="material-symbols-outlined text-lg">stop</span>
+              </button>
+            ) : (
+              <button
+                onClick={onSubmit}
+                className="bg-black text-white w-12 h-12 rounded-xl flex items-center justify-center hover:opacity-80 transition-all active:scale-95"
+              >
+                <span className="material-symbols-outlined text-lg">arrow_upward</span>
+              </button>
+            )}
           </div>
           <p className="text-center text-[10px] text-slate-300 mt-4">
             AI-driven analysis can contain inaccuracies. Verify critical data with source documents.
