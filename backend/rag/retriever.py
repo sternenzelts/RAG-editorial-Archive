@@ -30,21 +30,85 @@ class VectorStore:
         self.save()  # save to disk after every upload
 
     def search(self, query: str, top_k: int = 5) -> list[tuple[Chunk, float]]:
+        """Public search — uses MMR for diverse, relevant results."""
+        return self.mmr_search(query, top_k=top_k, lambda_param=0.6)
+
+    def mmr_search(
+        self,
+        query: str,
+        top_k: int = 5,
+        fetch_k: int = 20,
+        lambda_param: float = 0.6,
+    ) -> list[tuple[Chunk, float]]:
+        """
+        Maximal Marginal Relevance retrieval.
+
+        Balances relevance (cosine similarity to the query) against
+        diversity (dissimilarity to already-selected chunks).
+
+        lambda_param:
+          1.0  → pure relevance  (identical to flat cosine)
+          0.0  → pure diversity
+          0.6  → slightly relevance-biased (our default)
+
+        Steps:
+          1. Retrieve top `fetch_k` candidates by raw cosine similarity.
+          2. Greedily pick the next chunk that maximises:
+               lambda * sim(chunk, query) - (1-lambda) * max_sim(chunk, selected)
+        """
         if not self.embeddings:
             return []
 
         query_embedding = self.embed(query)
 
-        scores = []
-        for embedding in self.embeddings:
-            score = cosine_similarity(query_embedding, embedding)
-            scores.append(score)
+        # Step 1: score all chunks against the query
+        all_scores = [
+            cosine_similarity(query_embedding, emb)
+            for emb in self.embeddings
+        ]
 
-        top_indices = np.argsort(scores)[::-1][:top_k]
+        # Step 2: take the top fetch_k candidates (wider pool for MMR to pick from)
+        candidate_indices = np.argsort(all_scores)[::-1][:fetch_k].tolist()
+        candidate_embeddings = [self.embeddings[i] for i in candidate_indices]
+        candidate_scores = [all_scores[i] for i in candidate_indices]
 
+        selected: list[int] = []   # indices into candidate_indices
+        selected_embeddings: list[np.ndarray] = []
+
+        while len(selected) < top_k and len(selected) < len(candidate_indices):
+            best_idx = -1
+            best_score = float("-inf")
+
+            for ci, (emb, rel_score) in enumerate(zip(candidate_embeddings, candidate_scores)):
+                if ci in selected:
+                    continue
+
+                # Redundancy penalty: max similarity to any already-selected chunk
+                if selected_embeddings:
+                    redundancy = max(
+                        cosine_similarity(emb, sel_emb)
+                        for sel_emb in selected_embeddings
+                    )
+                else:
+                    redundancy = 0.0
+
+                mmr_score = lambda_param * rel_score - (1 - lambda_param) * redundancy
+
+                if mmr_score > best_score:
+                    best_score = mmr_score
+                    best_idx = ci
+
+            if best_idx == -1:
+                break
+
+            selected.append(best_idx)
+            selected_embeddings.append(candidate_embeddings[best_idx])
+
+        # Map back to actual chunk indices and return with their raw relevance scores
         results = []
-        for i in top_indices:
-            results.append((self.chunks[i], float(scores[i])))
+        for ci in selected:
+            chunk_idx = candidate_indices[ci]
+            results.append((self.chunks[chunk_idx], float(candidate_scores[ci])))
 
         return results
 
@@ -116,7 +180,12 @@ class VectorStore:
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    norm_a = np.linalg.norm(a)
+    norm_b = np.linalg.norm(b)
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return float(np.dot(a, b) / (norm_a * norm_b))
 
 
 vector_store = VectorStore()
+

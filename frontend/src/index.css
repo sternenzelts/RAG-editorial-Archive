@@ -1,2 +1,73 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
+
+/* ── Dark mode smooth transitions ─────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  transition-property: background-color, border-color, color;
+  transition-duration: 200ms;
+  transition-timing-function: ease;
+}
+
+/* Override: don't transition layout-affecting properties */
+button,
+input,
+textarea {
+  transition-property: background-color, border-color, color, box-shadow, transform, opacity;
+}
+
+/* ── Body base ────────────────────────────────────────────────────────────── */
+body {
+  background-color: #f8fafc; /* slate-50 */
+}
+
+html.dark body {
+  background-color: #020617; /* slate-950 */
+}
+
+/* ── Custom scrollbar ─────────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1; /* slate-300 */
+  border-radius: 99px;
+}
+
+html.dark ::-webkit-scrollbar-thumb {
+  background: #334155; /* slate-700 */
+}
+
+/* ── Citation card slide-in animation ────────────────────────────────────── */
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-in {
+  animation-fill-mode: both;
+}
+
+.fade-in {
+  animation-name: fade-in-up;
+}
+
+.slide-in-from-bottom-2 {
+  transform: translateY(8px);
+}
+
+.duration-500 {
+  animation-duration: 500ms;
+}

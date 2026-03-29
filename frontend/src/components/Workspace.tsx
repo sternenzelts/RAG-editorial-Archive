@@ -8,7 +8,7 @@ interface Collection {
   description: string
   sources: string[]
   status: string
-  synthesis: string
+  synthesis: any  // object from API or null
   created_at: string
 }
 
@@ -109,19 +109,27 @@ export default function Workspace({ onUploadClick }: WorkspaceProps) {
   // Load synthesis when active collection changes
   useEffect(() => {
     if (!activeCollection) { setSynthesis(null); setEditedSummary(''); return }
-    if (activeCollection.synthesis) {
-      try {
-        const data = JSON.parse(activeCollection.synthesis)
-        setSynthesis(data)
-        setEditedSummary(data.summary ?? '')
-      } catch {
-        setSynthesis(null)
-        setEditedSummary('')
+    const raw = activeCollection.synthesis
+    if (!raw) { setSynthesis(null); setEditedSummary(''); return }
+
+    let data: any = null
+    if (typeof raw === 'object' && raw !== null) {
+      data = { ...raw }
+    } else if (typeof raw === 'string' && raw.trim()) {
+      try { data = JSON.parse(raw) } catch { data = null }
+    }
+
+    if (data && data.summary) {
+      if (Array.isArray(data.cross_references)) {
+        data.cross_references = data.cross_references.length
       }
+      setSynthesis(data as Synthesis)
+      setEditedSummary(data.summary ?? '')
     } else {
       setSynthesis(null)
       setEditedSummary('')
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, collections])
 
   async function createCollection() {
@@ -176,17 +184,29 @@ export default function Workspace({ onUploadClick }: WorkspaceProps) {
     try {
       const res = await fetch(`${API}/workspace/collections/${activeId}/synthesize`, { method: 'POST' })
       if (!res.ok) {
-        const err = await res.json()
+        const err = await res.json().catch(() => ({}))
         alert(err.detail ?? 'Synthesis failed')
         return
       }
       const data = await res.json()
-      setSynthesis(data.synthesis)
-      setEditedSummary(data.synthesis.summary ?? '')
-      // refresh collections to pick up saved synthesis
-      const r2 = await fetch(`${API}/workspace/collections`)
-      const d2 = await r2.json()
-      setCollections(d2.collections ?? [])
+      const fresh: Synthesis = data.synthesis
+
+      // Normalize cross_references
+      if (Array.isArray(fresh.cross_references)) {
+        fresh.cross_references = (fresh.cross_references as any[]).length
+      }
+
+      // Set synthesis state directly from API response
+      setSynthesis(fresh)
+      setEditedSummary(fresh.summary ?? '')
+
+      // Update the collection in-place — no refetch, no race condition
+      setCollections(prev => prev.map(c =>
+        c.id === activeId ? { ...c, synthesis: fresh } : c
+      ))
+    } catch (err) {
+      console.error('Synthesis error:', err)
+      alert('Synthesis failed — check the backend console.')
     } finally {
       setIsSynthesizing(false)
     }
@@ -285,11 +305,10 @@ export default function Workspace({ onUploadClick }: WorkspaceProps) {
             <div
               key={col.id}
               onClick={() => setActiveId(col.id)}
-              className={`mx-3 my-1 rounded-xl px-4 py-3 cursor-pointer group transition-all duration-150 ${
-                col.id === activeId
+              className={`mx-3 my-1 rounded-xl px-4 py-3 cursor-pointer group transition-all duration-150 ${col.id === activeId
                   ? 'bg-slate-900 text-white shadow-md'
                   : 'hover:bg-slate-50 text-slate-700'
-              }`}
+                }`}
             >
               <div className="flex items-start justify-between">
                 <div className="flex items-center gap-2 min-w-0">
@@ -429,11 +448,10 @@ export default function Workspace({ onUploadClick }: WorkspaceProps) {
                 </button>
                 <button
                   onClick={finalize}
-                  className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
-                    activeCollection.status === 'finalized'
+                  className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeCollection.status === 'finalized'
                       ? 'bg-teal-600 text-white hover:bg-teal-700'
                       : 'bg-black text-white hover:opacity-80'
-                  }`}
+                    }`}
                 >
                   <span className="material-symbols-outlined text-[16px]">
                     {activeCollection.status === 'finalized' ? 'check_circle' : 'flag'}
@@ -449,19 +467,16 @@ export default function Workspace({ onUploadClick }: WorkspaceProps) {
 
                 {/* Status */}
                 <div className="flex items-center gap-3 mb-6">
-                  <span className={`text-[10px] font-black px-2.5 py-1 rounded-full uppercase tracking-widest border ${
-                    activeCollection.status === 'finalized'
+                  <span className={`text-[10px] font-black px-2.5 py-1 rounded-full uppercase tracking-widest border ${activeCollection.status === 'finalized'
                       ? 'bg-teal-50 text-teal-700 border-teal-200'
                       : 'bg-slate-100 text-slate-500 border-slate-200'
-                  }`}>
+                    }`}>
                     {activeCollection.status === 'finalized' ? '✓ Finalized' : 'Active Workspace'}
                   </span>
-                  <span className={`text-xs font-semibold flex items-center gap-1 ${
-                    activeCollection.status === 'finalized' ? 'text-teal-500' : 'text-slate-400'
-                  }`}>
-                    <span className={`w-1.5 h-1.5 rounded-full ${
-                      activeCollection.status === 'finalized' ? 'bg-teal-400' : 'bg-amber-400'
-                    }`} />
+                  <span className={`text-xs font-semibold flex items-center gap-1 ${activeCollection.status === 'finalized' ? 'text-teal-500' : 'text-slate-400'
+                    }`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${activeCollection.status === 'finalized' ? 'bg-teal-400' : 'bg-amber-400'
+                      }`} />
                     {activeCollection.status === 'finalized' ? 'Analysis Complete' : 'Drafting Analysis'}
                   </span>
 
@@ -581,13 +596,12 @@ export default function Workspace({ onUploadClick }: WorkspaceProps) {
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">
                           Confidence Level
                         </p>
-                        <p className={`text-2xl font-black ${
-                          confidencePct >= 80 ? 'text-teal-600' : confidencePct >= 50 ? 'text-amber-500' : 'text-red-500'
-                        }`} style={{ fontFamily: 'Manrope' }}>
+                        <p className={`text-2xl font-black ${confidencePct >= 80 ? 'text-teal-600' : confidencePct >= 50 ? 'text-amber-500' : 'text-red-500'
+                          }`} style={{ fontFamily: 'Manrope' }}>
                           {confidencePct >= 80 ? 'High' : confidencePct >= 50 ? 'Medium' : 'Low'} ({confidencePct}%)
                         </p>
                         <p className="text-[11px] text-slate-400 mt-1">
-                          Based on {synthesis.cross_references} cross-reference{synthesis.cross_references !== 1 ? 's' : ''}
+                          Based on {Array.isArray(synthesis.cross_references) ? (synthesis.cross_references as any[]).length : synthesis.cross_references} cross-reference{(Array.isArray(synthesis.cross_references) ? (synthesis.cross_references as any[]).length : synthesis.cross_references) !== 1 ? 's' : ''}
                         </p>
                       </div>
                     </div>

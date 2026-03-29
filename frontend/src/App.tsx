@@ -14,6 +14,8 @@ interface Message {
   citations: any[]
   confidence: number
   conflicts: any[]
+  timestamp?: number
+  streaming?: boolean
 }
 
 function App() {
@@ -31,13 +33,30 @@ function App() {
   const [isLoading, setIsLoading] = useState(false)
   const [question, setQuestion] = useState('')
   const [scrollToIndex, setScrollToIndex] = useState<number | null>(null)
+  const [darkMode, setDarkMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('rag_dark_mode') === 'true'
+    } catch {
+      return false
+    }
+  })
   const fileInputRef = useRef<HTMLInputElement>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
 
+  // Apply / remove dark class on <html>
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', darkMode)
+    try {
+      localStorage.setItem('rag_dark_mode', String(darkMode))
+    } catch {}
+  }, [darkMode])
+
   // Persist messages to localStorage whenever they change
   useEffect(() => {
+    // Don't persist mid-stream messages
+    const toSave = messages.filter(m => !m.streaming)
     try {
-      localStorage.setItem('rag_messages', JSON.stringify(messages))
+      localStorage.setItem('rag_messages', JSON.stringify(toSave))
     } catch {
       // ignore storage errors
     }
@@ -62,7 +81,6 @@ function App() {
         body: formData,
       })
       const data = await res.json()
-      // Use the server-sanitized filename so sidebar matches what's stored
       setSources(prev => [...prev, data.filename ?? file.name])
       setChunksLoaded(prev => prev + data.chunks_added)
     } catch (err) {
@@ -75,33 +93,15 @@ function App() {
     if (file) handleUpload(file)
   }
 
-  const unwrapAnswer = useCallback((ans: string, cit: any[], conf: number, con: any[]): [string, any[], number, any[]] => {
-    if (typeof ans !== 'string') return [ans, cit, conf, con]
-    const trimmed = ans.trim()
-    if (trimmed.startsWith('{')) {
-      try {
-        const parsed = JSON.parse(trimmed)
-        if (parsed && typeof parsed.answer === 'string') {
-          return unwrapAnswer(parsed.answer, parsed.citations ?? cit, parsed.confidence ?? conf, parsed.conflicts ?? con)
-        }
-      } catch { /* not JSON */ }
-    }
-    const jsonMatch = trimmed.match(/\{[\s\S]*"answer"[\s\S]*\}/)
-    if (jsonMatch) {
-      try {
-        const parsed = JSON.parse(jsonMatch[0])
-        if (parsed && typeof parsed.answer === 'string') {
-          return unwrapAnswer(parsed.answer, parsed.citations ?? cit, parsed.confidence ?? conf, parsed.conflicts ?? con)
-        }
-      } catch { /* not valid JSON */ }
-    }
-    const trailingJson = ans.match(/^([\s\S]*?)"\s*,\s*"(?:citations|confidence|conflicts)/)
-    if (trailingJson) return [trailingJson[1].replace(/^"/, '').trim(), cit, conf, con]
-    return [ans, cit, conf, con]
-  }, [])
-
   const pushError = useCallback((message: string) => {
-    const errMsg: Message = { role: 'error', answer: message, citations: [], confidence: 0, conflicts: [] }
+    const errMsg: Message = {
+      role: 'error',
+      answer: message,
+      citations: [],
+      confidence: 0,
+      conflicts: [],
+      timestamp: Date.now(),
+    }
     setMessages(prev => [...prev, errMsg])
   }, [])
 
@@ -109,12 +109,24 @@ function App() {
     abortControllerRef.current?.abort()
     abortControllerRef.current = null
     setIsLoading(false)
+    // Finalise any streaming message
+    setMessages(prev =>
+      prev.map(m => m.streaming ? { ...m, streaming: false } : m)
+    )
   }, [])
 
+  // ── Streaming submit ─────────────────────────────────────────────────────────
   const handleSubmit = async () => {
     if (!question.trim() || isLoading) return
 
-    const userMsg: Message = { role: 'user', answer: question, citations: [], confidence: 0, conflicts: [] }
+    const userMsg: Message = {
+      role: 'user',
+      answer: question,
+      citations: [],
+      confidence: 0,
+      conflicts: [],
+      timestamp: Date.now(),
+    }
     setMessages(prev => [...prev, userMsg])
     setQuestion('')
     setIsLoading(true)
@@ -122,8 +134,20 @@ function App() {
     const controller = new AbortController()
     abortControllerRef.current = controller
 
+    // Placeholder streaming assistant message
+    const streamingMsg: Message = {
+      role: 'assistant',
+      answer: '',
+      citations: [],
+      confidence: 0,
+      conflicts: [],
+      timestamp: Date.now(),
+      streaming: true,
+    }
+    setMessages(prev => [...prev, streamingMsg])
+
     try {
-      const res = await fetch('http://localhost:8000/query', {
+      const res = await fetch('http://localhost:8000/query/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question }),
@@ -133,32 +157,101 @@ function App() {
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}))
         const detail = errBody?.detail ?? ''
+        setMessages(prev => prev.filter(m => !m.streaming))
         if (detail.toLowerCase().includes('out of memory') || detail.toLowerCase().includes('oom')) {
           pushError('⚠️ Out of memory — the model ran out of RAM. Try closing other apps or switching to a smaller model.')
         } else if (res.status === 404 || detail.toLowerCase().includes('model')) {
-          pushError('⚠️ Model not found — make sure you\'ve pulled the model first: ollama pull qwen3.5:4b')
+          pushError("⚠️ Model not found — make sure you've pulled the model first: ollama pull qwen3.5:4b")
         } else {
           pushError(`⚠️ Server error (${res.status}): ${detail || 'Unknown error from backend.'}`)
         }
         return
       }
 
-      const data = await res.json()
-      let answer = data.answer
-      let citations = data.citations
-      let confidence = data.confidence
-      let conflicts = data.conflicts
+      // Consume the SSE stream
+      const reader = res.body!.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
 
-      ;[answer, citations, confidence, conflicts] = unwrapAnswer(answer, citations, confidence, conflicts)
+      const updateStreamingMessage = (updater: (prev: string) => string) => {
+        setMessages(prev => {
+          const idx = prev.findLastIndex(m => m.streaming)
+          if (idx === -1) return prev
+          const updated = [...prev]
+          updated[idx] = { ...updated[idx], answer: updater(updated[idx].answer) }
+          return updated
+        })
+      }
 
-      const assistantMsg: Message = { role: 'assistant', answer, citations, confidence, conflicts }
-      setMessages(prev => [...prev, assistantMsg])
+      const finaliseStreamingMessage = (data: any) => {
+        setMessages(prev => {
+          const idx = prev.findLastIndex(m => m.streaming)
+          if (idx === -1) return prev
+          const updated = [...prev]
+          updated[idx] = {
+            ...updated[idx],
+            answer: data.answer || updated[idx].answer,
+            citations: data.citations ?? [],
+            confidence: data.confidence ?? 0,
+            conflicts: data.conflicts ?? [],
+            streaming: false,
+          }
+          return updated
+        })
+      }
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+
+        for (const line of lines) {
+          if (line.startsWith('event: done')) continue
+          if (line.startsWith('event: end_tokens')) continue
+          if (line.startsWith('event: error')) continue
+
+          if (line.startsWith('data: ')) {
+            const raw = line.slice(6)
+
+            // Check if this is the done event payload (JSON with answer/citations)
+            if (raw.startsWith('{')) {
+              try {
+                const parsed = JSON.parse(raw)
+                if ('citations' in parsed || 'answer' in parsed) {
+                  finaliseStreamingMessage(parsed)
+                  continue
+                }
+              } catch {}
+            }
+
+            // Regular token — unescape newlines we escaped on the server
+            const token = raw.replace(/\\n/g, '\n')
+            if (token) {
+              updateStreamingMessage(prev => prev + token)
+            }
+          }
+
+          // Handle named events in the NEXT data line by checking prev line context
+          // (SSE named events come as "event: X\ndata: Y")
+        }
+      }
+
+      // Handle the done event which may be buffered separately
+      if (buffer.includes('event: done')) {
+        const dataMatch = buffer.match(/event: done\ndata: (.+)/)
+        if (dataMatch) {
+          try {
+            finaliseStreamingMessage(JSON.parse(dataMatch[1]))
+          } catch {}
+        }
+      }
 
     } catch (err: any) {
-      if (err?.name === 'AbortError') {
-        // User stopped — don't show error
-        return
-      }
+      setMessages(prev => prev.filter(m => !m.streaming))
+      if (err?.name === 'AbortError') return
       if (err instanceof TypeError && err.message.includes('fetch')) {
         pushError('⚠️ Cannot connect to the model server — make sure the backend is running on port 8000.')
       } else {
@@ -167,6 +260,8 @@ function App() {
     } finally {
       abortControllerRef.current = null
       setIsLoading(false)
+      // Safety: ensure no stuck streaming message
+      setMessages(prev => prev.map(m => m.streaming ? { ...m, streaming: false } : m))
     }
   }
 
@@ -178,8 +273,10 @@ function App() {
     localStorage.removeItem('rag_messages')
   }
 
+  const dm = darkMode
+
   return (
-    <div className="flex min-h-screen bg-slate-50">
+    <div className={`flex min-h-screen ${dm ? 'bg-slate-950' : 'bg-slate-50'}`}>
       <input
         ref={fileInputRef}
         type="file"
@@ -192,8 +289,10 @@ function App() {
         activeTab={activeTab}
         onTabChange={setActiveTab}
         sources={sources}
+        darkMode={darkMode}
         onClearAll={handleClearAll}
         onUploadClick={() => fileInputRef.current?.click()}
+        onToggleDarkMode={() => setDarkMode(d => !d)}
       />
       <div className="flex-1 flex flex-col h-screen overflow-hidden">
         <TopBar
@@ -207,6 +306,8 @@ function App() {
               messages={messages}
               isLoading={isLoading}
               question={question}
+              sources={sources}
+              darkMode={darkMode}
               onQuestionChange={setQuestion}
               onSubmit={handleSubmit}
               onStop={handleStop}
@@ -251,9 +352,11 @@ function App() {
               }}
             />
           )}
-          {activeTab === 'workspace' && (
+          {/* Workspace stays mounted (hidden when not active) so synthesis
+              fetches survive tab switches */}
+          <div style={{ display: activeTab === 'workspace' ? 'contents' : 'none' }}>
             <Workspace onUploadClick={() => fileInputRef.current?.click()} />
-          )}
+          </div>
         </main>
       </div>
     </div>
