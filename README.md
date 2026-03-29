@@ -4,6 +4,19 @@ A full-stack **Retrieval-Augmented Generation (RAG)** application that lets you 
 
 ---
 
+## 📸 Screenshots
+
+**Documents — Q&A Chat**
+![Analysis](docs/screenshots/analysis.png)
+
+**Library Archive**
+![Archive](docs/screenshots/archive.png)
+
+**Project Workspace**
+![Workspace](docs/screenshots/workspace.png)
+
+---
+
 ## ✨ Features
 
 | Feature | Description |
